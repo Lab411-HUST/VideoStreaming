@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen
+  xmlns:android="http://schemas.android.com/apk/res/android" android:title="opencv setup">
+<ListPreference android:entries="@array/thresold_name" android:entryValues="@array/thresold_value" android:key="THRESOLD" android:persistent="true" android:title="Threshold"></ListPreference>
+<ListPreference android:entries="@array/minpixel_name" android:entryValues="@array/minpixel_value" android:key="MINPIXEL" android:persistent="true" android:title="Minpixel"></ListPreference>
+</PreferenceScreen>

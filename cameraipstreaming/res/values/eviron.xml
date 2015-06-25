@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="evironLabel">
+        <item>indoor</item>
+        <item>outdoor</item>
+    </string-array>
+
+    <string-array name="evironValues">
+        <item></item>
+        <item>POLICY_SUBJECT_EVIRON</item>
+    </string-array>
+
+    <string-array name="evironSummary">
+        <item>select eviron</item>
+        <item>Audible and visual cues are given when the camera is about to begin recording.</item>
+    </string-array>
+</resources>

@@ -1,0 +1,460 @@
+
+#include <jni.h>
+#include <assert.h>
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libswscale/swscale.h>
+#include <android/log.h>
+#include <android/bitmap.h>
+
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeOpenFromFile(JNIEnv* env, jobject thiz, jstring mediafile);
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeOpenFromRawStream(JNIEnv* env, jobject thiz, jbyteArray mediaframe);
+
+//nativeClose() cleans up any outstanding resources, including audio &&/|| video when still opened
+//a call to nativeOpen() - including an unsuccessful one - must be matched by a call to nativeClose()
+JNIEXPORT void JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeClose(JNIEnv* env, jobject thiz);
+
+//nativeOpenAudio() acquires and initialises resources specific to audio
+//a call to nativeOpenAudio() - including an unsuccessful one - must be matched by a call to nativeCloseAudio() (or nativeClose())
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeOpenAudio(JNIEnv* env, jobject thiz, jbyteArray audioframe, jintArray audioframelength);
+
+JNIEXPORT void JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeCloseAudio(JNIEnv* env, jobject thiz);
+
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeOpenVideo(JNIEnv* env, jobject thiz, jobject bitmap);
+
+JNIEXPORT void JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeCloseVideo(JNIEnv* env, jobject thiz);
+
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeDecodeFrameFromFile(JNIEnv* env, jobject thiz);
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeDecodeFrameFromRawStream(JNIEnv* env, jobject thiz);
+
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeUpdateBitmap(JNIEnv* env, jobject thiz);
+
+#define AUDIO_DATA_ID   1
+#define VIDEO_DATA_ID   2
+
+AVFormatContext*    gFormatCtx;
+
+//video
+AVCodecContext*     gVideoCodecCtx;
+int                 gVideoStreamIdx;
+AVFrame*            gVideoFrame;
+jobject             gBitmapRef;
+void*               gBitmapRefPixelBuffer;
+AndroidBitmapInfo   gAbi;
+struct SwsContext*  gSwsContext;
+
+//audio
+AVCodecContext*     gAudioCodecCtx;
+int                 gAudioStreamIdx;
+jbyteArray          gAudioFrameRef; //reference to a java variable
+char*               gAudioFrameRefBuffer;
+int                 gAudioFrameRefBufferMaxSize;
+jintArray           gAudioFrameDataLengthRef; //reference to a java variable
+int*                gAudioFrameDataLengthRefBuffer;
+
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved)
+    {
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "JNI_OnLoad()");
+
+    gFormatCtx = NULL;
+
+    //video
+    gVideoCodecCtx = NULL;
+    gVideoStreamIdx = -1;
+    gVideoFrame = NULL;
+    gBitmapRef = NULL;
+    gBitmapRefPixelBuffer = NULL;
+    gSwsContext = NULL;
+    memset(&gAbi, 0, sizeof(gAbi));
+
+    //audio
+    gAudioCodecCtx = NULL;
+    gAudioStreamIdx = -1;
+    gAudioFrameRef = NULL;
+    gAudioFrameRefBuffer = NULL;
+    gAudioFrameRefBufferMaxSize = 0;
+    gAudioFrameDataLengthRef = NULL;
+    gAudioFrameDataLengthRefBuffer = NULL;
+
+    return JNI_VERSION_1_6;
+    }
+
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeOpenFromFile(JNIEnv* env, jobject thiz, jstring mediafile)
+    {
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "nativeOpenFromFile()");
+
+    avcodec_register_all();
+    av_register_all();
+
+    const char* mfileName = (*env)->GetStringUTFChars(env, mediafile, 0);
+    if (mfileName == 0)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "failed to retrieve media file name");
+        return -1;
+        }
+
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "opening %s", mfileName);
+
+    int result = av_open_input_file(&gFormatCtx, mfileName, NULL, 0, NULL);
+    (*env)->ReleaseStringUTFChars(env, mediafile, mfileName); //always release the java string reference
+    if (result != 0)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "av_open_input_file() failed");
+        return -2;
+        }
+
+    if (av_find_stream_info(gFormatCtx) < 0)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "av_find_stream_info() failed");
+        return -3;
+        }
+
+    return 0;
+    }
+
+JNIEXPORT void JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeClose(JNIEnv* env, jobject thiz)
+    {
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "nativeClose()");
+
+    Java_com_example_streaming_StreamingHeadlessCamcorder_nativeCloseAudio(env, thiz);
+    Java_com_example_streaming_StreamingHeadlessCamcorder_nativeCloseVideo(env, thiz);
+
+    if (gFormatCtx)
+        {
+        av_close_input_file(gFormatCtx);
+        gFormatCtx = NULL;
+        }
+    }
+
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeOpenAudio(JNIEnv* env, jobject thiz, jbyteArray audioframe, jintArray audioframelength)
+    {
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "nativeOpenAudio()");
+
+    if (gAudioFrameRef)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "call nativeCloseAudio() before calling this function");
+        return -1;
+        }
+
+    if ((*env)->IsSameObject(env, audioframe, NULL))
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "invalid arguments");
+        return -2;
+        }
+
+    //audio frame buffer
+    gAudioFrameRef = (*env)->NewGlobalRef(env, audioframe); //lock the array preventing the garbage collector from destructing it
+    if (gAudioFrameRef == NULL)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "NewGlobalRef() for audioframe failed");
+        return -3;
+        }
+
+    jboolean test;
+    gAudioFrameRefBuffer = (*env)->GetByteArrayElements(env, gAudioFrameRef, &test);
+    if (gAudioFrameRefBuffer == 0 || test == JNI_TRUE)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "failed to get audio frame reference or reference copied");
+        return -4;
+        }
+
+    gAudioFrameRefBufferMaxSize = (*env)->GetArrayLength(env, gAudioFrameRef);
+    if (gAudioFrameRefBufferMaxSize < AVCODEC_MAX_AUDIO_FRAME_SIZE)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "failed to read or incorrect buffer length: %d", gAudioFrameRefBufferMaxSize);
+        return -5;
+        }
+
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "buffer length: %d", gAudioFrameRefBufferMaxSize);
+
+    //audio frame data size
+    gAudioFrameDataLengthRef = (*env)->NewGlobalRef(env, audioframelength); //lock the variable preventing the garbage collector from destructing it
+    if (gAudioFrameDataLengthRef == NULL)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "NewGlobalRef() for audioframelength failed");
+        return -6;
+        }
+
+    gAudioFrameDataLengthRefBuffer = (*env)->GetIntArrayElements(env, gAudioFrameDataLengthRef, &test);
+    if (gAudioFrameDataLengthRefBuffer == 0 || test == JNI_TRUE)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "failed to get audio data length reference or reference copied");
+        return -7;
+        }
+
+    int audioDataLength = (*env)->GetArrayLength(env, gAudioFrameDataLengthRef);
+    if (audioDataLength != 1)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "failed to read or incorrect size of the audio data length reference: %d", audioDataLength);
+        return -8;
+        }
+
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "size of the audio data length reference: %d", audioDataLength);
+
+    //audio stream
+    int i;
+    int audioStreamIdx = -1;
+    for (i = 0; i < gFormatCtx->nb_streams && audioStreamIdx == -1; ++i)
+        if(gFormatCtx->streams[i]->codec->codec_type == CODEC_TYPE_AUDIO)
+            audioStreamIdx = i;
+
+    if (audioStreamIdx == -1)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "audio stream not found");
+        return -9;
+        }
+
+    gAudioCodecCtx = gFormatCtx->streams[audioStreamIdx]->codec;
+    AVCodec* audioCodec = avcodec_find_decoder(gAudioCodecCtx->codec_id);
+    if (!audioCodec)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "avcodec_find_decoder() failed to find audio decoder");
+        return -10;
+        }
+
+    if (avcodec_open(gAudioCodecCtx, audioCodec) != 0)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "avcodec_open() failed");
+        return -11;
+        }
+
+    //all good, set index so that nativeProcess() can now recognise the audio stream
+    gAudioStreamIdx = audioStreamIdx;
+    return 0;
+    }
+
+JNIEXPORT void JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeCloseAudio(JNIEnv* env, jobject thiz)
+    {
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "nativeCloseAudio()");
+
+    if (gAudioCodecCtx)
+        {
+        avcodec_close(gAudioCodecCtx);
+        gAudioCodecCtx = NULL;
+        }
+
+    if (gAudioFrameRef)
+        {
+        if (gAudioFrameRefBuffer)
+            {
+            (*env)->ReleaseByteArrayElements(env, gAudioFrameRef, gAudioFrameRefBuffer, 0);
+            gAudioFrameRefBuffer = NULL;
+            }
+        (*env)->DeleteGlobalRef(env, gAudioFrameRef);
+        gAudioFrameRef = NULL;
+        }
+    gAudioFrameRefBufferMaxSize = 0;
+
+    if (gAudioFrameDataLengthRef)
+        {
+        if (gAudioFrameDataLengthRefBuffer)
+            {
+            (*env)->ReleaseIntArrayElements(env, gAudioFrameDataLengthRef, gAudioFrameDataLengthRefBuffer, 0);
+            gAudioFrameDataLengthRefBuffer = NULL;
+            }
+        (*env)->DeleteGlobalRef(env, gAudioFrameDataLengthRef);
+        gAudioFrameDataLengthRef = NULL;
+        }
+
+    gAudioStreamIdx = -1;
+    }
+
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeOpenVideo(JNIEnv* env, jobject thiz, jobject bitmap)
+    {
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "nativeOpenVideo()");
+
+    if (gVideoFrame)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "call nativeCloseVideo() before calling this function");
+        return -1;
+        }
+
+    if ((*env)->IsSameObject(env, bitmap, NULL))
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "invalid arguments");
+        return -2;
+        }
+
+    gVideoFrame = avcodec_alloc_frame();
+    if (gVideoFrame == 0)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "avcodec_alloc_frame() failed");
+        return -3;
+        }
+
+    gBitmapRef = (*env)->NewGlobalRef(env, bitmap); //lock the bitmap preventing the garbage collector from destructing it
+    if (gBitmapRef == NULL)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "NewGlobalRef() failed");
+        return -4;
+        }
+
+    int result = AndroidBitmap_lockPixels(env, gBitmapRef, &gBitmapRefPixelBuffer);
+    if (result != 0)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "AndroidBitmap_lockPixels() failed with %d", result);
+        gBitmapRefPixelBuffer = NULL;
+        return -5;
+        }
+
+    if (AndroidBitmap_getInfo(env, gBitmapRef, &gAbi) != 0)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "AndroidBitmap_getInfo() failed");
+        return -6;
+        }
+
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "bitmap width: %d", gAbi.width);
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "bitmap height: %d", gAbi.height);
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "bitmap stride: %d", gAbi.stride);
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "bitmap format: %d", gAbi.format);
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "bitmap flags: %d", gAbi.flags);
+
+    int i;
+    int videoStreamIdx = -1;
+    for (i = 0; i < gFormatCtx->nb_streams && videoStreamIdx == -1; ++i)
+        if(gFormatCtx->streams[i]->codec->codec_type == CODEC_TYPE_VIDEO)
+            videoStreamIdx = i;
+
+    if (videoStreamIdx == -1)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "video stream not found");
+        return -7;
+        }
+
+    gVideoCodecCtx = gFormatCtx->streams[videoStreamIdx]->codec;
+    AVCodec* videoCodec = avcodec_find_decoder(gVideoCodecCtx->codec_id);
+    if (!videoCodec)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "avcodec_find_decoder() failed to find decoder");
+        return -8;
+        }
+
+    if (avcodec_open(gVideoCodecCtx, videoCodec) != 0)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "avcodec_open() failed");
+        return -9;
+        }
+
+    //all good, set index so that nativeProcess() can now recognise the video stream
+    gVideoStreamIdx = videoStreamIdx;
+    return 0;
+    }
+
+JNIEXPORT void JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeCloseVideo(JNIEnv* env, jobject thiz)
+    {
+    __android_log_print(ANDROID_LOG_INFO, "com.example.ffmpegav", "nativeCloseVideo()");
+
+    if (gVideoCodecCtx)
+        {
+        avcodec_close(gVideoCodecCtx);
+        gVideoCodecCtx = NULL;
+        }
+
+    sws_freeContext(gSwsContext);
+    gSwsContext = NULL;
+
+    if (gBitmapRef)
+        {
+        if (gBitmapRefPixelBuffer)
+            {
+            AndroidBitmap_unlockPixels(env, gBitmapRef);
+            gBitmapRefPixelBuffer = NULL;
+            }
+        (*env)->DeleteGlobalRef(env, gBitmapRef);
+        gBitmapRef = NULL;
+        }
+
+    gVideoStreamIdx = -1;
+
+    av_free(gVideoFrame);
+    gVideoFrame = NULL;
+
+    memset(&gAbi, 0, sizeof(gAbi));
+    }
+
+int decodeFrameFromPacket(AVPacket* aPacket)
+    {
+    if (aPacket->stream_index == gVideoStreamIdx)
+        {
+        int frameFinished = 0;
+        if (avcodec_decode_video2(gVideoCodecCtx, gVideoFrame, &frameFinished, aPacket) <= 0)
+            {
+            __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "avcodec_decode_video2() decoded no frame");
+            return -1;
+            }
+        return VIDEO_DATA_ID;
+        }
+
+    if (aPacket->stream_index == gAudioStreamIdx)
+        {
+        int dataLength = gAudioFrameRefBufferMaxSize;
+        if (avcodec_decode_audio3(gAudioCodecCtx, (int16_t*)gAudioFrameRefBuffer, &dataLength, aPacket) <= 0)
+            {
+            __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "avcodec_decode_audio3() decoded no frame");
+            gAudioFrameDataLengthRefBuffer[0] = 0;
+            return -2;
+            }
+
+        gAudioFrameDataLengthRefBuffer[0] = dataLength;
+        return AUDIO_DATA_ID;
+        }
+
+    return 0;
+    }
+
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeDecodeFrameFromFile(JNIEnv* env, jobject thiz)
+    {
+    AVPacket packet;
+    memset(&packet, 0, sizeof(packet)); //make sure we can safely free it
+
+    int i;
+    for (i = 0; i < gFormatCtx->nb_streams; ++i)
+        {
+        //av_init_packet(&packet);
+        if (av_read_frame(gFormatCtx, &packet) != 0)
+            {
+            __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "av_read_frame() failed");
+            return -1;
+            }
+
+        int ret = decodeFrameFromPacket(&packet);
+        av_free_packet(&packet);
+        if (ret != 0) //an error or a frame decoded
+            return ret;
+        }
+
+    return 0;
+    }
+
+JNIEXPORT jint JNICALL Java_com_example_streaming_StreamingHeadlessCamcorder_nativeUpdateBitmap(JNIEnv* env, jobject thiz)
+    {
+    gSwsContext = sws_getCachedContext(gSwsContext, gVideoCodecCtx->width, gVideoCodecCtx->height, gVideoCodecCtx->pix_fmt, gAbi.width, gAbi.height,PIX_FMT_RGBA, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+    if (gSwsContext == 0)
+        {
+        __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "sws_getCachedContext() failed");
+        return -1;
+        }
+
+    AVPicture pict;
+    int size = avpicture_fill(&pict, gBitmapRefPixelBuffer,PIX_FMT_RGBA, gAbi.width, gAbi.height);//bo dem pixel gBitmapRefPixelBuffer se nhan gia tri o dia chi &pict
+    if (size != gAbi.stride * gAbi.height)
+        {
+        //__android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "size != gAbi.stride * gAbi.height");
+       // __android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "size = %d", size);
+        //__android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "gAbi.stride * gAbi.height = %d", gAbi.stride * gAbi.height);
+        return -2;
+        }
+
+    int height = sws_scale(gSwsContext, (const uint8_t* const*)gVideoFrame->data, gVideoFrame->linesize, 0, gVideoCodecCtx->height, pict.data, pict.linesize);
+    if (height != gAbi.height)
+        {
+        //__android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "height != gAbi.height");
+        //__android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "height = %d", height);
+        //__android_log_print(ANDROID_LOG_ERROR, "com.example.ffmpegav", "gAbi.height = %d", gAbi.height);
+        return -3;
+        }
+
+    return 0;
+    }
+

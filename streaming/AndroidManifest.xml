@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.streaming"
+    android:versionCode="1"
+    android:versionName="1.0" >
+
+    <uses-sdk
+        android:minSdkVersion="8"
+        android:targetSdkVersion="16" />
+        <!-- This permission is needed to talk to the local network via WiFi. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Required only for debugging at the moment... -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" />
+
+    <!-- Active during capture. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Required for a hack that allows us to create a dummy SurfaceView from
+         a Service. This is necessary only because Android requires a
+         SurfaceView to use the Camera. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/AppTheme" >
+        <activity
+            android:name="com.example.streaming.MainActivity"
+            android:label="@string/app_name" >
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <service android:name=".CamcorderNodeService"
+            android:exported="false" />
+    </application>
+
+</manifest>
